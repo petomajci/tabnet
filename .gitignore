@@ -5,6 +5,7 @@ data/
 .ipynb_checkpoints/
 *.pt
 *~
+.vscode/
 
 # Notebook to python
 forest_example.py

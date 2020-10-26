@@ -197,7 +197,7 @@ class TabNet(torch.nn.Module):
     def __init__(self, input_dim, output_dim, n_d=8, n_a=8,
                  n_steps=3, gamma=1.3, cat_idxs=[], cat_dims=[], cat_emb_dim=1,
                  n_independent=2, n_shared=2, epsilon=1e-15,
-                 virtual_batch_size=128, momentum=0.02, device_name='auto',
+                 virtual_batch_size=128, momentum=0.02,
                  mask_type="sparsemax"):
         """
         Defines TabNet network
@@ -266,15 +266,6 @@ class TabNet(torch.nn.Module):
         self.tabnet = TabNetNoEmbeddings(self.post_embed_dim, output_dim, n_d, n_a, n_steps,
                                          gamma, n_independent, n_shared, epsilon,
                                          virtual_batch_size, momentum, mask_type)
-
-        # Defining device
-        if device_name == 'auto':
-            if torch.cuda.is_available():
-                device_name = 'cuda'
-            else:
-                device_name = 'cpu'
-        self.device = torch.device(device_name)
-        self.to(self.device)
 
     def forward(self, x):
         x = self.embedder(x)
