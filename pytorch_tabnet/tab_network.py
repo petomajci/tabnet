@@ -153,7 +153,7 @@ class TabNetEncoder(torch.nn.Module):
                 initialize_non_glu(task_mapping, n_d, task_dim)
                 self.multi_task_mappings.append(task_mapping)
         else:
-            self.final_mapping = Linear(n_d, output_dim, bias=False)
+            self.final_mapping = Linear(n_d, self.output_dim, bias=False)
             initialize_non_glu(self.final_mapping, n_d, output_dim)
 
     def forward(self, x):
