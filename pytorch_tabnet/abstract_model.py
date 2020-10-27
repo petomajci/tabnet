@@ -82,7 +82,7 @@ class TabModel(BaseEstimator):
         num_workers=0,
         drop_last=False,
         callbacks=None,
-        pin_memory=True
+        pin_memory=True,
     ):
         """Train a neural network stored in self.network
         Using train_dataloader for training data and
@@ -135,7 +135,7 @@ class TabModel(BaseEstimator):
         self.drop_last = drop_last
         self.input_dim = X_train.shape[1]
         self._stop_training = False
-        self.pin_memory = pin_memory and (self.device.type != 'cpu')
+        self.pin_memory = pin_memory and (self.device.type != "cpu")
 
         eval_set = eval_set if eval_set else []
 
@@ -147,7 +147,10 @@ class TabModel(BaseEstimator):
         check_nans(X_train)
         check_nans(y_train)
         self.update_fit_params(
-            X_train, y_train, eval_set, weights,
+            X_train,
+            y_train,
+            eval_set,
+            weights,
         )
 
         # Validate and reformat eval set depending on training data
@@ -178,8 +181,9 @@ class TabModel(BaseEstimator):
                 self._predict_epoch(eval_name, valid_dataloader)
 
             # Call method on_epoch_end for all callbacks
-            self._callback_container.on_epoch_end(epoch_idx,
-                                                  logs=self.history.epoch_metrics)
+            self._callback_container.on_epoch_end(
+                epoch_idx, logs=self.history.epoch_metrics
+            )
 
             if self._stop_training:
                 break
@@ -543,7 +547,9 @@ class TabModel(BaseEstimator):
             )
             callbacks.append(early_stopping)
         else:
-            print("No early stopping will be performed, last training weights will be used.")
+            print(
+                "No early stopping will be performed, last training weights will be used."
+            )
         if self.scheduler_fn is not None:
             # Add LR Scheduler call_back
             is_batch_level = self.scheduler_params.pop("is_batch_level", False)
