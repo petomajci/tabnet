@@ -37,8 +37,7 @@ class GBN(torch.nn.Module):
 
         return torch.cat(res, dim=0)
 
-
-class TabNetNoEmbeddings(torch.nn.Module):
+class TabNetEncoder(torch.nn.Module):
     def __init__(self, input_dim, output_dim,
                  n_d=8, n_a=8,
                  n_steps=3, gamma=1.3,
@@ -76,7 +75,7 @@ class TabNetNoEmbeddings(torch.nn.Module):
         mask_type : str
             Either "sparsemax" or "entmax" : this is the masking function to use
         """
-        super(TabNetNoEmbeddings, self).__init__()
+        super(TabNetEncoder, self).__init__()
         self.input_dim = input_dim
         self.output_dim = output_dim
         self.is_multi_task = isinstance(output_dim, list)
@@ -141,7 +140,8 @@ class TabNetNoEmbeddings(torch.nn.Module):
         prior = torch.ones(x.shape).to(x.device)
         M_loss = 0
         att = self.initial_splitter(x)[:, self.n_d:]
-
+        
+        steps_output = []
         for step in range(self.n_steps):
             M = self.att_transformers[step](prior, att)
             M_loss += torch.mean(torch.sum(torch.mul(M, torch.log(M+self.epsilon)),
@@ -152,21 +152,13 @@ class TabNetNoEmbeddings(torch.nn.Module):
             masked_x = torch.mul(M, x)
             out = self.feat_transformers[step](masked_x)
             d = ReLU()(out[:, :self.n_d])
-            res = torch.add(res, d)
+            steps_output.append(d)
             # update attention
             att = out[:, self.n_d:]
 
         M_loss /= self.n_steps
-
-        if self.is_multi_task:
-            # Result will be in list format
-            out = []
-            for task_mapping in self.multi_task_mappings:
-                out.append(task_mapping(res))
-        else:
-            out = self.final_mapping(res)
-        return out, M_loss
-
+        return steps_output, M_loss
+    
     def forward_masks(self, x):
         x = self.initial_bn(x)
 
@@ -191,6 +183,194 @@ class TabNetNoEmbeddings(torch.nn.Module):
             att = out[:, self.n_d:]
 
         return M_explain, masks
+
+class TabNetDecoder(torch.nn.Module):
+    def __init__(self, input_dim,
+                 n_d=8,
+                 n_steps=3,
+                 n_independent=2, n_shared=2,
+                 virtual_batch_size=128, momentum=0.02,):
+        """
+        Defines main part of the TabNet network without the embedding layers.
+
+        Parameters
+        ----------
+        input_dim : int
+            Number of features
+        output_dim : int or list of int for multi task classification
+            Dimension of network output
+            examples : one for regression, 2 for binary classification etc...
+        n_d : int
+            Dimension of the prediction  layer (usually between 4 and 64)
+        n_steps : int
+            Number of sucessive steps in the newtork (usually betwenn 3 and 10)
+        gamma : float
+            Float above 1, scaling factor for attention updates (usually betwenn 1.0 to 2.0)
+        n_independent : int
+            Number of independent GLU layer in each GLU block (default 2)
+        n_shared : int
+            Number of independent GLU layer in each GLU block (default 2)
+        virtual_batch_size : int
+            Batch size for Ghost Batch Normalization
+        momentum : float
+            Float value between 0 and 1 which will be used for momentum in all batch norm
+        """
+        super(TabNetDecoder, self).__init__()
+        self.input_dim = input_dim
+        self.n_d = n_d
+        self.n_steps = n_steps
+        self.n_independent = n_independent
+        self.n_shared = n_shared
+        self.virtual_batch_size = virtual_batch_size
+
+        self.feat_transformers = torch.nn.ModuleList()
+        self.reconstruction_layers = torch.nn.ModuleList()
+
+        if self.n_shared > 0:
+            shared_feat_transform = torch.nn.ModuleList()
+            for i in range(self.n_shared):
+                if i == 0:
+                    shared_feat_transform.append(Linear(n_d,
+                                                        2*n_d,
+                                                        bias=False))
+                else:
+                    shared_feat_transform.append(Linear(n_d, 2*n_d, bias=False))
+
+        else:
+            shared_feat_transform = None
+
+        for step in range(n_steps):
+            transformer = FeatTransformer(n_d, n_d, shared_feat_transform,
+                                          n_glu_independent=self.n_independent,
+                                          virtual_batch_size=self.virtual_batch_size,
+                                          momentum=momentum)
+            self.feat_transformers.append(transformer)
+            reconstruction_layer = Linear(n_d, self.input_dim, bias=False)
+            initialize_non_glu(reconstruction_layer, n_d, self.input_dim)
+            self.reconstruction_layers.append(reconstruction_layer)
+        
+
+    def forward(self, steps_output):
+        res = 0
+        for step_nb, step_output in enumerate(steps_output):
+            x = self.feat_transformers[step_nb](step_output)
+            x = self.reconstruction_layers[step_nb](step_output)
+            res = torch.add(res, d)
+        return res
+
+class TabNetPretraining(torch.nn.Module):
+    def __init__(self, input_dim, output_dim,
+                 n_d=8, n_a=8,
+                 n_steps=3, gamma=1.3,
+                 n_independent=2, n_shared=2, epsilon=1e-15,
+                 virtual_batch_size=128, momentum=0.02,
+                 mask_type="sparsemax"):
+        super(TabNetPretraining, self).__init__()
+
+        self.encoder = TabNetEncoder(input_dim=input_dim, output_dim=output_dim,
+                                    n_d=n_d, n_a=n_d,
+                                    n_steps=n_steps, gamma=gamma,
+                                    n_independent=n_independent, n_shared=n_shared, epsilon=epsilon,
+                                    virtual_batch_size=virtual_batch_size, momentum=momentum,
+                                    mask_type=mask_type)
+        self.decoder = TabNetDecoder(input_dim,
+                                    n_d=n_d,
+                                    n_steps=n_steps,
+                                    n_independent=n_independent, n_shared=n_shared,
+                                    virtual_batch_size=virtual_batch_size, momentum=momentum)
+
+    def forward(self, x):
+        steps_out, _ = self.encoder(x)
+        res = self.decoder(steps_out)
+        return res
+
+
+class TabNetNoEmbeddings(torch.nn.Module):
+    def __init__(self, input_dim, output_dim,
+                 n_d=8, n_a=8,
+                 n_steps=3, gamma=1.3,
+                 n_independent=2, n_shared=2, epsilon=1e-15,
+                 virtual_batch_size=128, momentum=0.02,
+                 mask_type="sparsemax"):
+        """
+        Defines main part of the TabNet network without the embedding layers.
+
+        Parameters
+        ----------
+        input_dim : int
+            Number of features
+        output_dim : int or list of int for multi task classification
+            Dimension of network output
+            examples : one for regression, 2 for binary classification etc...
+        n_d : int
+            Dimension of the prediction  layer (usually between 4 and 64)
+        n_a : int
+            Dimension of the attention  layer (usually between 4 and 64)
+        n_steps : int
+            Number of sucessive steps in the newtork (usually betwenn 3 and 10)
+        gamma : float
+            Float above 1, scaling factor for attention updates (usually betwenn 1.0 to 2.0)
+        n_independent : int
+            Number of independent GLU layer in each GLU block (default 2)
+        n_shared : int
+            Number of independent GLU layer in each GLU block (default 2)
+        epsilon : float
+            Avoid log(0), this should be kept very low
+        virtual_batch_size : int
+            Batch size for Ghost Batch Normalization
+        momentum : float
+            Float value between 0 and 1 which will be used for momentum in all batch norm
+        mask_type : str
+            Either "sparsemax" or "entmax" : this is the masking function to use
+        """
+        super(TabNetNoEmbeddings, self).__init__()
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.is_multi_task = isinstance(output_dim, list)
+        self.n_d = n_d
+        self.n_a = n_a
+        self.n_steps = n_steps
+        self.gamma = gamma
+        self.epsilon = epsilon
+        self.n_independent = n_independent
+        self.n_shared = n_shared
+        self.virtual_batch_size = virtual_batch_size
+        self.mask_type = mask_type
+        self.initial_bn = BatchNorm1d(self.input_dim, momentum=0.01)
+
+        self.encoder = TabNetEncoder(input_dim=input_dim, output_dim=output_dim,
+                                    n_d=n_d, n_a=n_d,
+                                    n_steps=n_steps, gamma=gamma,
+                                    n_independent=n_independent, n_shared=n_shared, epsilon=epsilon,
+                                    virtual_batch_size=virtual_batch_size, momentum=momentum,
+                                    mask_type=mask_type)
+
+        if self.is_multi_task:
+            self.multi_task_mappings = torch.nn.ModuleList()
+            for task_dim in output_dim:
+                task_mapping = Linear(n_d, task_dim, bias=False)
+                initialize_non_glu(task_mapping, n_d, task_dim)
+                self.multi_task_mappings.append(task_mapping)
+        else:
+            self.final_mapping = Linear(n_d, output_dim, bias=False)
+            initialize_non_glu(self.final_mapping, n_d, output_dim)
+
+    def forward(self, x):
+        res = 0
+        steps_output, M_loss = self.encoder(x)
+        res = torch.sum(torch.stack(steps_output, dim=0), dim=0)
+
+        if self.is_multi_task:
+            # Result will be in list format
+            out = []
+            for task_mapping in self.multi_task_mappings:
+                out.append(task_mapping(res))
+        else:
+            out = self.final_mapping(res)
+        return out, M_loss
+
+    def forward_masks(self, x):
+        return self.encoder.forward_masks(x)
 
 
 class TabNet(torch.nn.Module):
