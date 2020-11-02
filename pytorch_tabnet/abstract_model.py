@@ -46,6 +46,7 @@ class TabModel(BaseEstimator):
     epsilon: float = 1e-15
     momentum: float = 0.02
     lambda_sparse: float = 1e-3
+    pretraining_ratio: float = 0.1
     seed: int = 0
     clip_value: int = 1
     verbose: int = 1
@@ -60,11 +61,30 @@ class TabModel(BaseEstimator):
 
     def __post_init__(self):
         self.batch_size = 1024
-        self.virtual_batch_size = 1024
+        self.virtual_batch_size = 128
+        torch.manual_seed(self.seed)
         torch.manual_seed(self.seed)
         # Defining device
         self.device = torch.device(define_device(self.device_name))
         print(f"Device used : {self.device}")
+
+    def __update__(self, **kwargs):
+        """
+        Updates parameters.
+        If does not already exists, creates it.
+        Otherwise overwrite with warnings.
+        """
+        for var_name, value in kwargs.items():
+            if var_name == "output_dim":
+                # never update output dim
+                continue
+            try:
+                exec(f"global previous_val; previous_val = self.{var_name}")
+                if previous_val != value:
+                    print(f"Warining: {var_name} changed from {previous_val} to {value}")
+                    exec(f"self.{var_name} = value")
+            except AttributeError:
+                exec(f"self.{var_name} = value")
 
     def fit(
         self,
@@ -83,6 +103,7 @@ class TabModel(BaseEstimator):
         drop_last=False,
         callbacks=None,
         pin_memory=True,
+        from_unsupervised=None
     ):
         """Train a neural network stored in self.network
         Using train_dataloader for training data and
@@ -124,6 +145,8 @@ class TabModel(BaseEstimator):
             List of custom callbacks
         pin_memory: bool
             Whether to set pin_memory to True or False during training
+        from_unsupervised: path or unsupervised model
+            Use a previously self supervised model as starting weights
         """
         # update model name
 
@@ -160,10 +183,24 @@ class TabModel(BaseEstimator):
             X_train, y_train, eval_set
         )
 
+        if from_unsupervised is not None:
+            # Update parameters to match self pretraining
+            unsupervised_params = {}
+            for key, val in from_unsupervised.get_params().items():
+                if isinstance(val, type):
+                    # Don't save torch specific params
+                    continue
+                else:
+                    unsupervised_params[key] = val
+            self.__update__(**unsupervised_params)
+
         self._set_network()
         self._set_metrics(eval_metric, eval_names)
         self._set_optimizer()
         self._set_callbacks(callbacks)
+
+        if from_unsupervised is not None:
+            self.load_weights_from_unsupervised(from_unsupervised)
 
         # Call method on_train_begin for all callbacks
         self._callback_container.on_train_begin()
@@ -273,6 +310,17 @@ class TabModel(BaseEstimator):
         res_explain = np.vstack(res_explain)
 
         return res_explain, res_masks
+
+    def load_weights_from_unsupervised(self, unsupervised_model):
+        for param, weights in unsupervised_model.network.state_dict().items():
+            if param.startswith('encoder'):
+                # Convert encoder's layers name to match
+                new_param = "tabnet."+param
+            else:
+                new_param = param
+            if self.network.state_dict().get(new_param) is not None:
+                # update only common layers
+                self.network.state_dict()[new_param] = weights
 
     def save_model(self, path):
         """Saving TabNet model in two distinct files.

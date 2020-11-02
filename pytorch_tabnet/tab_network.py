@@ -156,10 +156,12 @@ class TabNetEncoder(torch.nn.Module):
             self.final_mapping = Linear(n_d, self.output_dim, bias=False)
             initialize_non_glu(self.final_mapping, n_d, output_dim)
 
-    def forward(self, x):
+    def forward(self, x, prior=None):
         x = self.initial_bn(x)
 
-        prior = torch.ones(x.shape).to(x.device)
+        if prior is None:
+            prior = torch.ones(x.shape).to(x.device)
+
         M_loss = 0
         att = self.initial_splitter(x)[:, self.n_d :]
 
@@ -293,23 +295,52 @@ class TabNetPretraining(torch.nn.Module):
     def __init__(
         self,
         input_dim,
-        output_dim,
+        pretraining_ratio=0.2,
         n_d=8,
         n_a=8,
         n_steps=3,
         gamma=1.3,
+        cat_idxs=[],
+        cat_dims=[],
+        cat_emb_dim=1,
         n_independent=2,
         n_shared=2,
         epsilon=1e-15,
         virtual_batch_size=128,
         momentum=0.02,
+        device_name="auto",
         mask_type="sparsemax",
     ):
         super(TabNetPretraining, self).__init__()
 
+        self.cat_idxs = cat_idxs or []
+        self.cat_dims = cat_dims or []
+        self.cat_emb_dim = cat_emb_dim
+
+        self.input_dim = input_dim
+        self.n_d = n_d
+        self.n_a = n_a
+        self.n_steps = n_steps
+        self.gamma = gamma
+        self.epsilon = epsilon
+        self.n_independent = n_independent
+        self.n_shared = n_shared
+        self.mask_type = mask_type
+        self.pretraining_ratio = pretraining_ratio
+
+        if self.n_steps <= 0:
+            raise ValueError("n_steps should be a positive integer.")
+        if self.n_independent == 0 and self.n_shared == 0:
+            raise ValueError("n_shared and n_independant can't be both zero.")
+
+        self.virtual_batch_size = virtual_batch_size
+        self.embedder = EmbeddingGenerator(input_dim, cat_dims, cat_idxs, cat_emb_dim)
+        self.post_embed_dim = self.embedder.post_embed_dim
+
+        self.masker = RandomObfuscator(self.pretraining_ratio)
         self.encoder = TabNetEncoder(
-            input_dim=input_dim,
-            output_dim=output_dim,
+            input_dim=self.post_embed_dim,
+            output_dim=self.post_embed_dim,
             n_d=n_d,
             n_a=n_d,
             n_steps=n_steps,
@@ -322,7 +353,7 @@ class TabNetPretraining(torch.nn.Module):
             mask_type=mask_type,
         )
         self.decoder = TabNetDecoder(
-            input_dim,
+            self.post_embed_dim,
             n_d=n_d,
             n_steps=n_steps,
             n_independent=n_independent,
@@ -332,9 +363,28 @@ class TabNetPretraining(torch.nn.Module):
         )
 
     def forward(self, x):
-        steps_out, _ = self.encoder(x)
-        res = self.decoder(steps_out)
-        return res
+        """
+        Returns: res, embedded_x, obf_vars
+            res : output of reconstruction
+            embedded_x : embedded input
+            obf_vars : which variable where obfuscated
+        """
+        embedded_x = self.embedder(x)
+        if self.training:
+            masked_x, obf_vars = self.masker(embedded_x)
+            # set prior of encoder with obf_mask
+            prior = 1 - obf_vars
+            steps_out, _ = self.encoder(masked_x,
+                                        prior=prior)
+            res = self.decoder(steps_out)
+            # TODO : should we remove this?
+            # return reconstructed features only
+            # res = torch.mul(1 - obf_mask, res)
+            return res, embedded_x, obf_vars
+        else:
+            steps_out, _ = self.encoder(x)
+            res = self.decoder(steps_out)
+            return res, embedded_x, torch.zeros(embedded_x.shape)
 
 
 class TabNetNoEmbeddings(torch.nn.Module):
@@ -824,3 +874,32 @@ class EmbeddingGenerator(torch.nn.Module):
         # concat
         post_embeddings = torch.cat(cols, dim=1)
         return post_embeddings
+
+
+class RandomObfuscator(torch.nn.Module):
+    """
+    Create and applies obfuscation masks
+    """
+
+    def __init__(self, pretraining_ratio):
+        """
+        This create random obfuscation for self suppervised pretraining
+        Parameters
+        ----------
+        pretraining_ratio : float
+            Ratio of feature to randomly discard for reconstruction
+        """
+        super(RandomObfuscator, self).__init__()
+        self.pretraining_ratio = pretraining_ratio
+
+    def forward(self, x):
+        """
+        Generate random obfuscation mask.
+
+        Returns
+        -------
+        masked input and obfuscated variables.
+        """
+        obfuscated_vars = torch.bernoulli(self.pretraining_ratio * torch.ones(x.shape))
+        masked_input = torch.mul(1 - obfuscated_vars, x)
+        return masked_input, obfuscated_vars
