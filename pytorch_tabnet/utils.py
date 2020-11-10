@@ -188,7 +188,7 @@ def create_explain_matrix(input_dim, cat_emb_dim, cat_idxs, post_embed_dim):
             acc_emb += all_emb_impact[nb_emb]
             nb_emb += 1
 
-    reducing_matrix = np.zeros((post_embed_dim, input_dim))
+    reducing_matrix = scipy.sparse.lil_matrix((post_embed_dim, input_dim), dtype=np.int8)
     for i, cols in enumerate(indices_trick):
         reducing_matrix[cols, i] = 1
 
